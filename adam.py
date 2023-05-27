@@ -102,18 +102,36 @@ if __name__ == "__main__":
     for p in params:
         p.grad = torch.randn_like(p)
 
-    adam = torch.optim.Adam(params, lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0, fused=True)
+    params_copy = []
+    for p in params:
+        clone = p.clone().detach().cuda()
+        clone.requires_grad = True
+        clone.grad = p.grad.clone().detach().cuda()
+        params_copy.append(clone)
+    
+    # check that params and params copy are close
+    for p, p_copy in zip(params, params_copy):
+        assert torch.allclose(p, p_copy)
+        assert torch.allclose(p.grad, p_copy.grad)
+    
 
-    fused_adam = FusedAdam(params, lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
+    adam = torch.optim.Adam(params, lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
+
+    fused_adam = FusedAdam(params_copy, lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
 
     # time 10000 steps 
     import time
 
     for optim in [adam, fused_adam]:
         start = time.time()
-        for i in range(10000):
+        for i in range(5):
             optim.step()
         end = time.time()
         print("time elapsed: ", end - start)
+    print(p)
+    print(p_copy)
 
     # check that results are the same 
+    for p, p_copy in zip(params, params_copy):
+        assert torch.allclose(p, p_copy)
+        assert torch.allclose(p.grad, p_copy.grad)
