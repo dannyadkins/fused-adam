@@ -6,3 +6,9 @@ Notes:
 - (part of this is clearly because of forking functionality)
 - I believe the core speedup is due to the computations all occurring on chip instead of being copied back and forth. The elementwise operations themselves are easily fused by PyTorch's JIT 
 - have not yet experimented with block size tuning.
+
+Resources:
+https://pytorch.org/docs/stable/generated/torch.optim.Adam.html
+https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html
+https://github.com/lucidrains/lion-pytorch/blob/main/lion_pytorch/triton.py
+
