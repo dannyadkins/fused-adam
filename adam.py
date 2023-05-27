@@ -3,7 +3,7 @@ import triton
 import triton.language as tl
 
 @triton.jit 
-def update_fn_kernel(p_ptr, grad_ptr, lr, beta1, beta2, eps, weight_decay, n_elements, BLOCK_SIZE: tl.constexpr):
+def update_fn_kernel(p_ptr, grad_ptr, m_ptr, v_ptr, lr, beta1, beta2, eps, weight_decay, n_elements, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
 
     block_start = pid * BLOCK_SIZE
@@ -20,14 +20,30 @@ def update_fn_kernel(p_ptr, grad_ptr, lr, beta1, beta2, eps, weight_decay, n_ele
     # load the slice of grad
     grad = tl.load(offset_grad_ptr, mask=mask)
 
-    p = p - lr * grad
+    # gt <- grad 
+    # mt <- beta1 * mt-1 + (1 - beta1) * gt
+    # vt <- beta2 * vt-1 + (1 - beta2) * gt * gt
+    # mthat <- mt / (1 - beta1^t)
+    # vthat <- vt / (1 - beta2^t)
+    # pt <- pt-1 - lr * mthat / (sqrt(vthat) + eps) - lr * weight_decay * pt-1
 
-    # store the slice of p
+    m_prev = tl.load(m_ptr + offsets, mask=mask)
+    v_prev = tl.load(v_ptr + offsets, mask=mask)
+    mt = beta1 * m_prev + (1 - beta1) * grad
+    vt = beta2 * v_prev + (1 - beta2) * grad * grad
+    mthat = mt / (1 - beta1)
+    vthat = vt / (1 - beta2)
+    p = p - lr * mthat / (tl.sqrt(vthat) + eps) - lr * weight_decay * p
+
+    # store the slice of p, m, v 
     tl.store(offset_p_ptr, p, mask=mask)
+    tl.store(m_ptr + offsets, mt, mask=mask)
+    tl.store(v_ptr + offsets, vt, mask=mask)
+
+    # TODO are we losing precision for some reason? 
 
 
-
-def fused_update_fn(p, grad, lr, beta1, beta2, eps, weight_decay):
+def fused_update_fn(p, grad, m, v, lr, beta1, beta2, eps, weight_decay):
     # find the current program
     # calculate the offsets based on the block size (what is block size in this case? its 1? no it should be a big chunk of the params, needs to be power of 2)
 
@@ -45,7 +61,7 @@ def fused_update_fn(p, grad, lr, beta1, beta2, eps, weight_decay):
     # note: we do not need to malloc the output here because we are just doing a simple update in place 
     # p, grad are passed as ptrs because they are tensors? 
     # lr, beta1, beta2, eps, weight_decay are passed as values because they are scalars?
-    update_fn_kernel[(grid,)](p, grad, lr, beta1, beta2, eps, weight_decay, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    update_fn_kernel[(grid,)](p, grad, m, v, lr, beta1, beta2, eps, weight_decay, n_elements, BLOCK_SIZE=BLOCK_SIZE)
 
 class FusedAdam(torch.optim.Optimizer):
     def __init__(self, params, lr=0.001, betas=(0.9, 0.999), eps=1e-8, weight_decay=0):
@@ -66,12 +82,17 @@ class FusedAdam(torch.optim.Optimizer):
                 weight_decay = group['weight_decay']
                 state = self.state[p]
 
+                if (len(state) == 0):
+                    state['m'] = torch.zeros_like(p)
+                    state['v'] = torch.zeros_like(p)
+                
+                m = state['m']
+                v = state['v']
+
                 # TODO pass in momentum and anything else from state too here 
                 fused_update_fn(
-                    p, grad, lr, beta1, beta2, eps, weight_decay 
+                    p, grad, m, v, lr, beta1, beta2, eps, weight_decay 
                 )
-
-
 
 
 if __name__ == "__main__":
@@ -81,9 +102,18 @@ if __name__ == "__main__":
     for p in params:
         p.grad = torch.randn_like(p)
 
-    # adam = torch.optim.Adam(params, lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
+    adam = torch.optim.Adam(params, lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0, fused=True)
 
     fused_adam = FusedAdam(params, lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
 
+    # time 10000 steps 
+    import time
 
-    fused_adam.step()
+    for optim in [adam, fused_adam]:
+        start = time.time()
+        for i in range(10000):
+            optim.step()
+        end = time.time()
+        print("time elapsed: ", end - start)
+
+    # check that results are the same 
